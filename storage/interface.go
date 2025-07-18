@@ -215,6 +215,9 @@ type SelectHints struct {
 	// When disabled, the result may contain samples outside the queried time range but Select() performances
 	// may be improved.
 	DisableTrimming bool
+
+	// ReplaceNullsWithZeros indicates whether to replace null values with zeros.
+	ReplaceNullsWithZeros bool
 }
 
 // TODO(bwplotka): Move to promql/engine_test.go?
