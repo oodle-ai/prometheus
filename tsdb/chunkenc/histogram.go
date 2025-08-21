@@ -16,6 +16,7 @@ package chunkenc
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 
 	"github.com/prometheus/prometheus/model/histogram"
@@ -1012,7 +1013,10 @@ func (it *histogramIterator) Next() ValueType {
 		for i := range it.pBuckets {
 			v, err := readVarbitInt(&it.br)
 			if err != nil {
-				it.err = err
+				if err != io.EOF {
+					it.err = err
+				}
+
 				return ValNone
 			}
 			it.pBuckets[i] = v
@@ -1023,7 +1027,10 @@ func (it *histogramIterator) Next() ValueType {
 		for i := range it.nBuckets {
 			v, err := readVarbitInt(&it.br)
 			if err != nil {
-				it.err = err
+				if err != io.EOF {
+					it.err = err
+				}
+
 				return ValNone
 			}
 			it.nBuckets[i] = v
@@ -1110,7 +1117,10 @@ func (it *histogramIterator) Next() ValueType {
 	for i := range it.pBuckets {
 		dod, err := readVarbitInt(&it.br)
 		if err != nil {
-			it.err = err
+			if err != io.EOF {
+				it.err = err
+			}
+
 			return ValNone
 		}
 		it.pBucketsDelta[i] += dod
@@ -1123,7 +1133,10 @@ func (it *histogramIterator) Next() ValueType {
 	for i := range it.nBuckets {
 		dod, err := readVarbitInt(&it.br)
 		if err != nil {
-			it.err = err
+			if err != io.EOF {
+				it.err = err
+			}
+
 			return ValNone
 		}
 		it.nBucketsDelta[i] += dod
