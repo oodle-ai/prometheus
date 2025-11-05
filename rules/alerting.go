@@ -17,6 +17,8 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +46,8 @@ const (
 
 	// AlertStateLabel is the label name indicating the state of an alert.
 	alertStateLabel = "alertstate"
+
+	validUntilAttemptsEnvVar = "PROMETHEUS_ALERTING_VALID_UNTIL_ATTEMPTS"
 )
 
 // AlertState denotes the state of an active alert.
@@ -143,6 +147,8 @@ type AlertingRule struct {
 
 	logger log.Logger
 
+	validUntilAttempts int
+
 	noDependentRules  *atomic.Bool
 	noDependencyRules *atomic.Bool
 }
@@ -154,6 +160,16 @@ func NewAlertingRule(
 	restored bool, logger log.Logger,
 ) *AlertingRule {
 	el := externalLabels.Map()
+
+	// Default: Allow for two Eval or Alertmanager send failures.
+	validUntilAttempts := 4
+	envVal := os.Getenv(validUntilAttemptsEnvVar)
+	if len(envVal) > 0 {
+		intVal, err := strconv.ParseInt(envVal, 10, 32)
+		if err == nil {
+			validUntilAttempts = int(intVal)
+		}
+	}
 
 	return &AlertingRule{
 		name:                name,
@@ -173,6 +189,7 @@ func NewAlertingRule(
 		lastError:           atomic.NewError(nil),
 		noDependentRules:    atomic.NewBool(false),
 		noDependencyRules:   atomic.NewBool(false),
+		validUntilAttempts:  validUntilAttempts,
 	}
 }
 
@@ -553,12 +570,11 @@ func (r *AlertingRule) sendAlerts(ctx context.Context, ts time.Time, resendDelay
 	r.ForEachActiveAlert(func(alert *Alert) {
 		if alert.needsSending(ts, resendDelay) {
 			alert.LastSentAt = ts
-			// Allow for two Eval or Alertmanager send failures.
 			delta := resendDelay
 			if interval > resendDelay {
 				delta = interval
 			}
-			alert.ValidUntil = ts.Add(4 * delta)
+			alert.ValidUntil = ts.Add(delta * time.Duration(r.validUntilAttempts))
 			anew := *alert
 			// The notifier re-uses the labels slice, hence make a copy.
 			anew.Labels = alert.Labels.Copy()
