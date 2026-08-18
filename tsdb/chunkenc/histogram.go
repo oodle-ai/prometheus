@@ -882,19 +882,11 @@ func (it *histogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int
 	fh.NegativeSpans = resize(fh.NegativeSpans, len(it.nSpans))
 	copy(fh.NegativeSpans, it.nSpans)
 
-	fh.PositiveBuckets = resize(fh.PositiveBuckets, len(it.pBuckets))
-	var currentPositive float64
-	for i, b := range it.pBuckets {
-		currentPositive += float64(b)
-		fh.PositiveBuckets[i] = currentPositive
-	}
+	fh.PositiveBuckets = resize(fh.PositiveBuckets, len(it.pFloatBuckets))
+	copy(fh.PositiveBuckets, it.pFloatBuckets)
 
-	fh.NegativeBuckets = resize(fh.NegativeBuckets, len(it.nBuckets))
-	var currentNegative float64
-	for i, b := range it.nBuckets {
-		currentNegative += float64(b)
-		fh.NegativeBuckets[i] = currentNegative
-	}
+	fh.NegativeBuckets = resize(fh.NegativeBuckets, len(it.nFloatBuckets))
+	copy(fh.NegativeBuckets, it.nFloatBuckets)
 
 	fh.CustomValues = resize(fh.CustomValues, len(it.customValues))
 	copy(fh.CustomValues, it.customValues)

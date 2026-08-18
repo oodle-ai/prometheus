@@ -1023,6 +1023,112 @@ func TestAtFloatHistogram(t *testing.T) {
 		require.Equal(t, expOutput[i], h, "histogram %d unequal", i)
 		i++
 	}
+	require.NoError(t, it.Err())
+	require.Len(t, expOutput, int(i))
+
+	// Now do the same, but recycle the same FloatHistogram across all
+	// samples, which exercises the copying branch of AtFloatHistogram. The
+	// pre-populated slices are longer than needed to make sure they get
+	// resized and fully overwritten.
+	it = chk.Iterator(it)
+	i = int64(0)
+	fh := &histogram.FloatHistogram{
+		PositiveSpans:   make([]histogram.Span, 5),
+		NegativeSpans:   make([]histogram.Span, 5),
+		PositiveBuckets: []float64{7, 7, 7, 7, 7, 7, 7, 7, 7, 7},
+		NegativeBuckets: []float64{7, 7, 7, 7, 7, 7, 7, 7, 7, 7},
+	}
+	for it.Next() != ValNone {
+		ts, h := it.AtFloatHistogram(fh)
+		require.Same(t, fh, h)
+		require.Equal(t, i, ts)
+		require.Equal(t, expOutput[i], h, "histogram %d unequal", i)
+		i++
+	}
+	require.NoError(t, it.Err())
+	require.Len(t, expOutput, int(i))
+
+	// Interleave AtHistogram(nil) and AtFloatHistogram(nil), which make the
+	// iterator hand out and then recycle its bucket slices, with
+	// AtFloatHistogram into a reused FloatHistogram.
+	it = chk.Iterator(it)
+	i = int64(0)
+	fh = &histogram.FloatHistogram{}
+	for it.Next() != ValNone {
+		_, h := it.AtHistogram(nil)
+		_, sharedFh := it.AtFloatHistogram(nil)
+		require.Equal(t, expOutput[i], sharedFh, "shared float histogram %d unequal", i)
+		ts, gotFh := it.AtFloatHistogram(fh)
+		require.Same(t, fh, gotFh)
+		require.Equal(t, i, ts)
+		require.Equal(t, expOutput[i], gotFh, "float histogram %d unequal", i)
+		require.Equal(t, expOutput[i], h.ToFloat(nil), "histogram %d unequal", i)
+		i++
+	}
+	require.NoError(t, it.Err())
+	require.Len(t, expOutput, int(i))
+}
+
+func TestAtFloatHistogramCustomBucketsReuse(t *testing.T) {
+	input := []histogram.Histogram{
+		{
+			Schema:          histogram.CustomBucketsSchema,
+			Count:           7,
+			Sum:             1234.5,
+			PositiveSpans:   []histogram.Span{{Offset: 0, Length: 3}},
+			PositiveBuckets: []int64{1, 1, 2},
+			CustomValues:    []float64{1, 2, 5},
+		},
+		{
+			Schema:          histogram.CustomBucketsSchema,
+			Count:           12,
+			Sum:             2345.6,
+			PositiveSpans:   []histogram.Span{{Offset: 0, Length: 3}},
+			PositiveBuckets: []int64{3, 1, 1},
+			CustomValues:    []float64{1, 2, 5},
+		},
+	}
+	expOutput := []*histogram.FloatHistogram{
+		{
+			Schema:          histogram.CustomBucketsSchema,
+			Count:           7,
+			Sum:             1234.5,
+			PositiveSpans:   []histogram.Span{{Offset: 0, Length: 3}},
+			PositiveBuckets: []float64{1, 2, 4},
+			CustomValues:    []float64{1, 2, 5},
+		},
+		{
+			CounterResetHint: histogram.NotCounterReset,
+			Schema:           histogram.CustomBucketsSchema,
+			Count:            12,
+			Sum:              2345.6,
+			PositiveSpans:    []histogram.Span{{Offset: 0, Length: 3}},
+			PositiveBuckets:  []float64{3, 4, 5},
+			CustomValues:     []float64{1, 2, 5},
+		},
+	}
+
+	chk := NewHistogramChunk()
+	app, err := chk.Appender()
+	require.NoError(t, err)
+	for i := range input {
+		newc, _, _, err := app.AppendHistogram(nil, int64(i), &input[i], false)
+		require.NoError(t, err)
+		require.Nil(t, newc)
+	}
+
+	it := chk.Iterator(nil)
+	i := int64(0)
+	fh := &histogram.FloatHistogram{}
+	for it.Next() != ValNone {
+		ts, h := it.AtFloatHistogram(fh)
+		require.Same(t, fh, h)
+		require.Equal(t, i, ts)
+		require.Equal(t, expOutput[i], h, "histogram %d unequal", i)
+		i++
+	}
+	require.NoError(t, it.Err())
+	require.Len(t, expOutput, int(i))
 }
 
 func TestHistogramChunkAppendableGauge(t *testing.T) {
