@@ -14,6 +14,7 @@
 package chunkenc
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math/bits"
 )
@@ -127,6 +128,75 @@ func readVarbitInt(b *bstreamReader) (int64, error) {
 	}
 
 	return val, nil
+}
+
+// varbitIntPayloadBits is the payload size for each prefix
+// length of putVarbitInt, indexed by the number of leading one
+// bits. A prefix of eight ones (a 64 bit payload) is not in the
+// table; readVarbitInts takes the slow path for it.
+var varbitIntPayloadBits = [8]uint8{0, 3, 6, 9, 12, 18, 25, 56}
+
+// readVarbitInts reads len(vals) varbit ints, one per element,
+// and adds each to the element it lands on. It is readVarbitInt
+// in a loop, with the reader state held in locals, the prefix
+// read as one byte and the buffer topped up 32 bits at a time,
+// because a native histogram chunk reads one varbit int per
+// bucket per sample and that loop is most of the cost of
+// decoding one.
+//
+// Bits above `valid` in the buffer are never meaningful, here
+// or in bstreamReader, so a top up can shift them out. The top
+// up stops short of the last byte of the stream for the same
+// reason loadNextBuffer does. Whatever the fast path cannot
+// take, a 64 bit payload or a code cut by the end of the
+// stream, goes through readVarbitInt.
+//
+// A table driven variant without the branch on the zero code
+// was measured slower: the dependent table loads cost more than
+// the branch misses.
+func readVarbitInts(b *bstreamReader, vals []int64) error {
+	buffer, valid, off := b.buffer, b.valid, b.streamOffset
+	stream := b.stream
+	for i := range vals {
+		if valid < 32 && off+4 < len(stream) {
+			buffer = buffer<<32 | uint64(binary.BigEndian.Uint32(stream[off:]))
+			off += 4
+			valid += 32
+		}
+
+		if valid >= 8 {
+			d := uint8(buffer >> (valid - 8))
+			if d&0x80 == 0 {
+				// A single zero bit: the value is zero.
+				valid--
+				continue
+			}
+			n := uint8(bits.LeadingZeros8(^d))
+			if n < 7 {
+				sz := varbitIntPayloadBits[n]
+				total := n + 1 + sz
+				if total <= valid {
+					valid -= total
+					payload := (buffer >> valid) & ((uint64(1) << sz) - 1)
+					if payload > (1 << (sz - 1)) {
+						payload -= (1 << sz)
+					}
+					vals[i] += int64(payload)
+					continue
+				}
+			}
+		}
+
+		b.buffer, b.valid, b.streamOffset = buffer, valid, off
+		v, err := readVarbitInt(b)
+		if err != nil {
+			return err
+		}
+		buffer, valid, off = b.buffer, b.valid, b.streamOffset
+		vals[i] += v
+	}
+	b.buffer, b.valid, b.streamOffset = buffer, valid, off
+	return nil
 }
 
 func bitRangeUint(x uint64, nbits int) bool {

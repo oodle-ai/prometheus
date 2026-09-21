@@ -1105,40 +1105,40 @@ func (it *histogramIterator) Next() ValueType {
 		return ValHistogram
 	}
 
-	var current int64
-	for i := range it.pBuckets {
-		dod, err := readVarbitInt(&it.br)
-		if err != nil {
-			if err != io.EOF {
-				it.err = err
-			}
-
-			return ValNone
+	if err := readVarbitInts(&it.br, it.pBucketsDelta); err != nil {
+		if err != io.EOF {
+			it.err = err
 		}
-		it.pBucketsDelta[i] += dod
-		it.pBuckets[i] += it.pBucketsDelta[i]
-		current += it.pBuckets[i]
-		it.pFloatBuckets[i] = float64(current)
+
+		return ValNone
 	}
+	applyBucketDeltas(it.pBucketsDelta, it.pBuckets, it.pFloatBuckets)
 
-	current = 0
-	for i := range it.nBuckets {
-		dod, err := readVarbitInt(&it.br)
-		if err != nil {
-			if err != io.EOF {
-				it.err = err
-			}
-
-			return ValNone
+	if err := readVarbitInts(&it.br, it.nBucketsDelta); err != nil {
+		if err != io.EOF {
+			it.err = err
 		}
-		it.nBucketsDelta[i] += dod
-		it.nBuckets[i] += it.nBucketsDelta[i]
-		current += it.nBuckets[i]
-		it.nFloatBuckets[i] = float64(current)
+
+		return ValNone
 	}
+	applyBucketDeltas(it.nBucketsDelta, it.nBuckets, it.nFloatBuckets)
 
 	it.numRead++
 	return ValHistogram
+}
+
+// applyBucketDeltas adds the deltas to the bucket deltas and
+// refreshes the absolute float counts. The three slices have
+// the same length.
+func applyBucketDeltas(deltas, buckets []int64, floats []float64) {
+	buckets = buckets[:len(deltas)]
+	floats = floats[:len(deltas)]
+	var current int64
+	for i, d := range deltas {
+		buckets[i] += d
+		current += buckets[i]
+		floats[i] = float64(current)
+	}
 }
 
 func (it *histogramIterator) readSum() bool {
