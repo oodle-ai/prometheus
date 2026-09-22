@@ -113,5 +113,77 @@ func TestVarbitIntRandomRoundTrip(t *testing.T) {
 			require.NoError(t, err, "round %d value %d", round, i)
 			require.Equal(t, want, got, "round %d value %d", round, i)
 		}
+
+		// The same stream through readVarbitInts, in runs of
+		// random length with single reads in between, so the
+		// fast path starts and hands over at every buffer
+		// state, and the run that reaches the end of the
+		// stream takes the slow path for its last codes. The
+		// destination starts non-zero to check that the values
+		// are added, not stored.
+		bsr = newBReader(bs.bytes())
+		for i := 0; i < len(numbers); {
+			if rng.Intn(4) == 0 {
+				got, err := readVarbitInt(&bsr)
+				require.NoError(t, err, "round %d value %d", round, i)
+				require.Equal(t, numbers[i], got, "round %d value %d", round, i)
+				i++
+				continue
+			}
+			n := 1 + rng.Intn(50)
+			if i+n > len(numbers) {
+				n = len(numbers) - i
+			}
+			vals := make([]int64, n)
+			for j := range vals {
+				vals[j] = int64(j) - 7
+			}
+			require.NoError(t, readVarbitInts(&bsr, vals), "round %d values %d..%d", round, i, i+n)
+			for j := range vals {
+				require.Equal(t, numbers[i+j]+int64(j)-7, vals[j], "round %d value %d", round, i+j)
+			}
+			i += n
+		}
+	}
+}
+
+// TestVarbitIntsTruncatedStream checks that on a stream cut
+// short the fast path gives what the slow one gives, value for
+// value and error for error. A bit stream carries no count, so
+// the slow reader itself reads padding as zero codes and only
+// fails when it runs out of bytes inside a code; the chunk
+// relies on its sample count. A run of zero length reads
+// nothing.
+func TestVarbitIntsTruncatedStream(t *testing.T) {
+	bs := bstream{}
+	for _, v := range []int64{5, -1000, 1 << 40, 3, 0, 0, 1 << 60, -(1 << 62), 7} {
+		putVarbitInt(&bs, v)
+	}
+	full := bs.bytes()
+
+	bsr := newBReader(full)
+	require.NoError(t, readVarbitInts(&bsr, nil))
+	require.NoError(t, readVarbitInts(&bsr, []int64{}))
+	vals := make([]int64, 9)
+	require.NoError(t, readVarbitInts(&bsr, vals))
+	require.Equal(t, []int64{5, -1000, 1 << 40, 3, 0, 0, 1 << 60, -(1 << 62), 7}, vals)
+
+	for cut := 1; cut < len(full); cut++ {
+		bsr := newBReader(full[:cut])
+		vals := make([]int64, 9)
+		fastErr := readVarbitInts(&bsr, vals)
+
+		ref := newBReader(full[:cut])
+		want := make([]int64, 9)
+		var slowErr error
+		for i := range want {
+			want[i], slowErr = readVarbitInt(&ref)
+			if slowErr != nil {
+				want[i] = 0
+				break
+			}
+		}
+		require.Equal(t, slowErr, fastErr, "cut at %d bytes", cut)
+		require.Equal(t, want, vals, "cut at %d bytes", cut)
 	}
 }
