@@ -14,6 +14,7 @@
 package chunkenc
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
 	"math/rand"
@@ -59,7 +60,7 @@ func wideCumulativeChunk(b testing.TB, numSamples, width int) *HistogramChunk {
 }
 
 func BenchmarkHistogramIteratorNext(b *testing.B) {
-	for _, width := range []int{64, 225, 677} {
+	for _, width := range []int{6, 30, 64, 225, 677} {
 		const numSamples = 240
 		chk := wideCumulativeChunk(b, numSamples, width)
 		b.Run(fmt.Sprintf("%dx%d", numSamples, width), func(b *testing.B) {
@@ -257,4 +258,88 @@ func TestAtFloatHistogramAfterAtHistogram(t *testing.T) {
 		require.True(t, fhGot.Equals(fhAgain))
 	}
 	require.NoError(t, it.Err())
+}
+
+// FuzzReadVarbitIntsRoundTrip encodes arbitrary values and reads
+// them back through readVarbitInts in runs of arbitrary length,
+// with single slow reads between them, so every code, the 64 bit
+// one included, is read at every alignment and buffer state. The
+// values have to come back exactly.
+func FuzzReadVarbitIntsRoundTrip(f *testing.F) {
+	f.Add([]byte{0, 0, 0, 0, 0, 0, 0, 0x80, 1, 2, 3, 4, 5, 6, 7, 8}, []byte{3, 0, 1})
+	f.Add([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f}, []byte{1})
+	f.Fuzz(func(t *testing.T, raw, runs []byte) {
+		var values []int64
+		for i := 0; i+8 <= len(raw); i += 8 {
+			v := int64(binary.LittleEndian.Uint64(raw[i:]))
+			// Spread the values over every size class.
+			switch raw[i] % 4 {
+			case 0:
+				v >>= 60
+			case 1:
+				v >>= 40
+			case 2:
+				v >>= 20
+			}
+			values = append(values, v)
+		}
+		bs := bstream{}
+		for _, v := range values {
+			putVarbitInt(&bs, v)
+		}
+		r := newBReader(bs.bytes())
+		for i, k := 0, 0; i < len(values); k++ {
+			n := 1
+			if len(runs) > 0 {
+				n = int(runs[k%len(runs)])
+			}
+			if n == 0 {
+				v, err := readVarbitInt(&r)
+				require.NoError(t, err)
+				require.Equal(t, values[i], v, "value %d", i)
+				i++
+				continue
+			}
+			n = min(n, len(values)-i)
+			got := make([]int64, n)
+			require.NoError(t, readVarbitInts(&r, got))
+			require.Equal(t, values[i:i+n], got, "values %d..%d", i, i+n)
+			i += n
+		}
+	})
+}
+
+// FuzzReadVarbitInts feeds arbitrary bytes, corrupt and cut
+// short, to the fast decoder: it must not panic or read past the
+// stream, and it must agree with the slow decoder wherever that
+// one decodes whole codes. On a code cut short the slow decoder
+// returns an unspecified value without an error (readBits does
+// not notice it ran out), and the fast one, which loads the
+// buffer in other steps, may return another, so the values are
+// compared only up to the first code that runs past the end.
+func FuzzReadVarbitInts(f *testing.F) {
+	bs := bstream{}
+	for _, v := range []int64{0, 1, -1, 4, -3, 32, 256, 2048, 131072, 16777216, 1 << 40, math.MinInt64, math.MaxInt64} {
+		putVarbitInt(&bs, v)
+	}
+	f.Add(bs.bytes(), uint8(13))
+	f.Add([]byte{0xff, 0xff, 0xff}, uint8(4))
+	f.Fuzz(func(t *testing.T, data []byte, n uint8) {
+		slow := newBReader(data)
+		want := make([]int64, 0, n)
+		totalBits := 8 * len(data)
+		for i := 0; i < int(n); i++ {
+			before := 8*slow.streamOffset - int(slow.valid)
+			v, err := readVarbitInt(&slow)
+			after := 8*slow.streamOffset - int(slow.valid)
+			if err != nil || after > totalBits || after < before {
+				break
+			}
+			want = append(want, v)
+		}
+		fast := newBReader(data)
+		got := make([]int64, n)
+		_ = readVarbitInts(&fast, got) // must not panic
+		require.Equal(t, want, got[:len(want)])
+	})
 }
