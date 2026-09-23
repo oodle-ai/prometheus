@@ -132,8 +132,9 @@ func readVarbitInt(b *bstreamReader) (int64, error) {
 
 // varbitIntPayloadBits is the payload size for each prefix
 // length of putVarbitInt, indexed by the number of leading one
-// bits. A prefix of eight ones (a 64 bit payload) is not in the
-// table; readVarbitInts takes the slow path for it.
+// bits. The fast path of readVarbitInts takes prefixes of up to six
+// ones; the 56 and 64 bit payloads take the slow path, so the last
+// entry is only there to complete the table.
 var varbitIntPayloadBits = [8]uint8{0, 3, 6, 9, 12, 18, 25, 56}
 
 // readVarbitInts reads len(vals) varbit ints, one per element,
@@ -148,7 +149,7 @@ var varbitIntPayloadBits = [8]uint8{0, 3, 6, 9, 12, 18, 25, 56}
 // or in bstreamReader, so a top up can shift them out. The top
 // up stops short of the last byte of the stream for the same
 // reason loadNextBuffer does. Whatever the fast path cannot
-// take, a 64 bit payload or a code cut by the end of the
+// take, a 56 or 64 bit payload or a code cut by the end of the
 // stream, goes through readVarbitInt.
 //
 // A table driven variant without the branch on the zero code

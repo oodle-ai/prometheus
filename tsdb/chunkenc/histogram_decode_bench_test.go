@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/prometheus/model/histogram"
+	"github.com/prometheus/prometheus/tsdb/tsdbutil"
 )
 
 // wideCumulativeChunk builds a chunk of `numSamples` cumulative
@@ -342,4 +343,32 @@ func FuzzReadVarbitInts(f *testing.F) {
 		_ = readVarbitInts(&fast, got) // must not panic
 		require.Equal(t, want, got[:len(want)])
 	})
+}
+
+// TestAtFloatHistogramWithoutDestinationOwnsItsBuckets checks that
+// each read without a destination returns bucket arrays of its own:
+// a second read of the same sample, or a read of the next one, must
+// not change what an earlier read returned.
+func TestAtFloatHistogramWithoutDestinationOwnsItsBuckets(t *testing.T) {
+	c := NewHistogramChunk()
+	app, err := c.Appender()
+	require.NoError(t, err)
+	for i, h := range tsdbutil.GenerateTestHistograms(3) {
+		_, _, app, err = app.AppendHistogram(nil, int64(i), h, false)
+		require.NoError(t, err)
+	}
+
+	it := c.Iterator(nil)
+	require.Equal(t, ValHistogram, it.Next())
+	_, first := it.AtFloatHistogram(nil)
+	want := first.Copy()
+	_, again := it.AtFloatHistogram(nil)
+	require.Equal(t, want, again)
+	again.PositiveBuckets[0] = -1
+	require.Equal(t, want, first, "a second read shares no array with the first")
+
+	require.Equal(t, ValHistogram, it.Next())
+	_, next := it.AtFloatHistogram(nil)
+	require.NotEqual(t, want.Count, next.Count)
+	require.Equal(t, want, first, "the next sample leaves an earlier read as it was")
 }
