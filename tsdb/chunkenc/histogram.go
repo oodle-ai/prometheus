@@ -847,6 +847,12 @@ func (it *histogramIterator) AtHistogram(h *histogram.Histogram) (int64, *histog
 	return it.t, h
 }
 
+// AtFloatHistogram builds the absolute bucket counts from the
+// bucket deltas of the iterator each time it is called.
+// AtHistogram(nil) hands out those same deltas. A caller must not
+// change the buckets of that histogram: the change goes into the
+// result of this method for the same sample, and Next decodes the
+// next sample from the changed deltas.
 func (it *histogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int64, *histogram.FloatHistogram) {
 	if value.IsStaleNaN(it.sum) {
 		return it.t, &histogram.FloatHistogram{Sum: it.sum}
