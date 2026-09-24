@@ -1474,3 +1474,102 @@ func TestHistogramAppendOnlyErrors(t *testing.T) {
 		require.EqualError(t, err, "histogram counter reset")
 	})
 }
+
+// TestAtFloatHistogramWithAndWithoutDestination pins the two
+// read paths to each other now that the absolute counts are
+// built on demand: a read with a destination writes them into
+// it, a read without one builds a slice it hands out, and what
+// it hands out stays untouched by later reads.
+func TestAtFloatHistogramWithAndWithoutDestination(t *testing.T) {
+	for _, width := range []int{1, 2, 135} {
+		chk := wideCumulativeChunk(t, 20, width)
+
+		// Every sample through a destination.
+		var withDst []*histogram.FloatHistogram
+		it := chk.Iterator(nil)
+		for it.Next() != ValNone {
+			fh := &histogram.FloatHistogram{}
+			_, got := it.AtFloatHistogram(fh)
+			require.Same(t, fh, got)
+			withDst = append(withDst, got.Copy())
+		}
+		require.NoError(t, it.Err())
+		require.Len(t, withDst, 20)
+
+		// Every sample without one, keeping each result.
+		var borrowed []*histogram.FloatHistogram
+		it = chk.Iterator(nil)
+		for it.Next() != ValNone {
+			_, got := it.AtFloatHistogram(nil)
+			borrowed = append(borrowed, got)
+		}
+		require.NoError(t, it.Err())
+		require.Len(t, borrowed, 20)
+
+		for i := range withDst {
+			require.True(t, withDst[i].Equals(borrowed[i]), "width %d sample %d\nwant %v\ngot  %v", width, i, withDst[i], borrowed[i])
+			// A handed out result is the reader's own: no later
+			// read may have written into it.
+			if i > 0 {
+				require.NotSame(t, &borrowed[0].PositiveBuckets[0], &borrowed[i].PositiveBuckets[0], "width %d sample %d shares buckets with the first", width, i)
+			}
+		}
+
+		// A destination that comes in too large or too small is
+		// resized, not appended to.
+		it = chk.Iterator(nil)
+		require.NotEqual(t, ValNone, it.Next())
+		big := &histogram.FloatHistogram{PositiveBuckets: make([]float64, width+7), NegativeBuckets: make([]float64, 3)}
+		_, got := it.AtFloatHistogram(big)
+		require.Len(t, got.PositiveBuckets, width)
+		require.Empty(t, got.NegativeBuckets)
+		require.True(t, withDst[0].Equals(got))
+	}
+}
+
+// TestAtFloatHistogramAfterAtHistogram covers reading both
+// forms of the same sample, which share the bucket state the
+// absolute counts are built from.
+func TestAtFloatHistogramAfterAtHistogram(t *testing.T) {
+	chk := wideCumulativeChunk(t, 10, 9)
+	it := chk.Iterator(nil)
+	for it.Next() != ValNone {
+		h := &histogram.Histogram{}
+		_, hGot := it.AtHistogram(h)
+		fh := &histogram.FloatHistogram{}
+		_, fhGot := it.AtFloatHistogram(fh)
+		require.True(t, hGot.ToFloat(nil).Equals(fhGot))
+		// And the other way round on the same sample.
+		_, fhAgain := it.AtFloatHistogram(nil)
+		require.True(t, fhGot.Equals(fhAgain))
+	}
+	require.NoError(t, it.Err())
+}
+
+// TestAtFloatHistogramWithoutDestinationOwnsItsBuckets checks that
+// each read without a destination returns bucket arrays of its own:
+// a second read of the same sample, or a read of the next one, must
+// not change what an earlier read returned.
+func TestAtFloatHistogramWithoutDestinationOwnsItsBuckets(t *testing.T) {
+	c := NewHistogramChunk()
+	app, err := c.Appender()
+	require.NoError(t, err)
+	for i, h := range tsdbutil.GenerateTestHistograms(3) {
+		_, _, app, err = app.AppendHistogram(nil, int64(i), h, false)
+		require.NoError(t, err)
+	}
+
+	it := c.Iterator(nil)
+	require.Equal(t, ValHistogram, it.Next())
+	_, first := it.AtFloatHistogram(nil)
+	want := first.Copy()
+	_, again := it.AtFloatHistogram(nil)
+	require.Equal(t, want, again)
+	again.PositiveBuckets[0] = -1
+	require.Equal(t, want, first, "a second read shares no array with the first")
+
+	require.Equal(t, ValHistogram, it.Next())
+	_, next := it.AtFloatHistogram(nil)
+	require.NotEqual(t, want.Count, next.Count)
+	require.Equal(t, want, first, "the next sample leaves an earlier read as it was")
+}
