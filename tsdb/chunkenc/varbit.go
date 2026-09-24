@@ -132,9 +132,11 @@ func readVarbitInt(b *bstreamReader) (int64, error) {
 
 // varbitIntPayloadBits is the payload size for each prefix
 // length of putVarbitInt, indexed by the number of leading one
-// bits. The fast path of readVarbitInts takes prefixes of up to six
-// ones; the 56 and 64 bit payloads take the slow path, so the last
-// entry is only there to complete the table.
+// bits. readVarbitInts reads only entries 1 to 6. A zero code
+// (no leading one) has no payload and has its own branch, and
+// prefixes of seven or eight ones (56 and 64 bit payloads) go
+// through readVarbitInt. Entries 0 and 7 are there only so that
+// the count of leading ones is the index.
 var varbitIntPayloadBits = [8]uint8{0, 3, 6, 9, 12, 18, 25, 56}
 
 // readVarbitInts reads len(vals) varbit ints, one per element,
@@ -152,9 +154,9 @@ var varbitIntPayloadBits = [8]uint8{0, 3, 6, 9, 12, 18, 25, 56}
 // take, a 56 or 64 bit payload or a code cut by the end of the
 // stream, goes through readVarbitInt.
 //
-// A table driven variant without the branch on the zero code
-// was measured slower: the dependent table loads cost more than
-// the branch misses.
+// The zero code has a branch of its own and does not go through
+// the payload table: it is the most frequent code, and the
+// branch keeps a table load out of its dependency chain.
 //
 // A zero is one 0 bit, and most buckets of a histogram whose
 // rates hold steady read a zero. So a run of 0 bits is taken in

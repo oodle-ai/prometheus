@@ -1096,8 +1096,8 @@ func (it *histogramIterator) Next() ValueType {
 	return ValHistogram
 }
 
-// applyBucketDeltas adds the deltas to the bucket deltas. Both
-// slices have the same length.
+// applyBucketDeltas adds each delta to the bucket at the same
+// index. Both slices have the same length.
 func applyBucketDeltas(deltas, buckets []int64) {
 	buckets = buckets[:len(deltas)]
 	for i, d := range deltas {
