@@ -291,7 +291,11 @@ func FuzzReadVarbitIntsRoundTrip(f *testing.F) {
 // FuzzReadVarbitInts feeds arbitrary bytes, corrupt and cut
 // short, to the fast decoder: it must not panic or read past the
 // stream, and it must agree with the slow decoder wherever that
-// one decodes whole codes. On a code cut short the slow decoder
+// one decodes whole codes. It must agree on the values, on the
+// reader position after each whole code, and on the error where
+// the slow decoder stops with one. A wrong position is not
+// visible in the values of one call, but the next read of the
+// chunk starts from it. On a code cut short the slow decoder
 // returns an unspecified value without an error (readBits does
 // not notice it ran out), and the fast one, which loads the
 // buffer in other steps, may return another, so the values are
@@ -304,21 +308,71 @@ func FuzzReadVarbitInts(f *testing.F) {
 	f.Add(bs.bytes(), uint8(13))
 	f.Add([]byte{0xff, 0xff, 0xff}, uint8(4))
 	f.Fuzz(func(t *testing.T, data []byte, n uint8) {
+		// The slow decoder, one code at a time, gives the values,
+		// the position after each whole code, and the error that
+		// stops it, if any.
 		slow := newBReader(data)
 		want := make([]int64, 0, n)
+		pos := []int{0}
+		var slowErr error
 		totalBits := 8 * len(data)
 		for i := 0; i < int(n); i++ {
-			before := 8*slow.streamOffset - int(slow.valid)
 			v, err := readVarbitInt(&slow)
-			after := 8*slow.streamOffset - int(slow.valid)
-			if err != nil || after > totalBits || after < before {
+			if err != nil {
+				slowErr = err
+				break
+			}
+			after := bitPosition(&slow)
+			if after > totalBits || after < pos[len(pos)-1] {
 				break
 			}
 			want = append(want, v)
+			pos = append(pos, after)
 		}
+
+		// All the whole codes in one call.
 		fast := newBReader(data)
-		got := make([]int64, n)
-		_ = readVarbitInts(&fast, got) // must not panic
+		got := make([]int64, len(want))
+		require.NoError(t, readVarbitInts(&fast, got))
+		require.Equal(t, want, got)
+		require.Equal(t, pos[len(want)], bitPosition(&fast), "position after %d codes", len(want))
+		// Then the code that stopped the slow decoder. readBits
+		// does not check that the bytes it loads hold all the
+		// bits it wants, and whether a cut code hits that depends
+		// on how the buffer was loaded. When it does, the reader
+		// position falls outside the stream, and the errors are
+		// not compared.
+		if slowErr != nil {
+			err := readVarbitInts(&fast, []int64{0})
+			if end := bitPosition(&fast); end >= pos[len(want)] && end <= totalBits {
+				require.Equal(t, slowErr, err)
+			}
+		}
+
+		// One code per call, so that each code starts from the
+		// state the previous call left.
+		fast = newBReader(data)
+		for i := range want {
+			v := []int64{0}
+			require.NoError(t, readVarbitInts(&fast, v))
+			require.Equal(t, want[i], v[0], "value %d", i)
+			require.Equal(t, pos[i+1], bitPosition(&fast), "position after code %d", i)
+		}
+
+		// All n values in one call, past the whole codes.
+		fast = newBReader(data)
+		got = make([]int64, n)
+		fastErr := readVarbitInts(&fast, got) // Must not panic.
 		require.Equal(t, want, got[:len(want)])
+		if len(want) == int(n) {
+			require.NoError(t, fastErr)
+			require.Equal(t, pos[n], bitPosition(&fast))
+		}
 	})
+}
+
+// bitPosition is the number of bits of the stream that r has
+// read.
+func bitPosition(r *bstreamReader) int {
+	return 8*r.streamOffset - int(r.valid)
 }
