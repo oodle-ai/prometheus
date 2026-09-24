@@ -990,27 +990,21 @@ func (it *histogramIterator) Next() ValueType {
 		}
 		it.sum = math.Float64frombits(sum)
 
-		for i := range it.pBuckets {
-			v, err := readVarbitInt(&it.br)
-			if err != nil {
-				if err != io.EOF {
-					it.err = err
-				}
-
-				return ValNone
+		// readVarbitInts adds to each bucket. The buckets were
+		// appended as zeros above, so the result is the value read.
+		if err := readVarbitInts(&it.br, it.pBuckets); err != nil {
+			if err != io.EOF {
+				it.err = err
 			}
-			it.pBuckets[i] = v
+
+			return ValNone
 		}
-		for i := range it.nBuckets {
-			v, err := readVarbitInt(&it.br)
-			if err != nil {
-				if err != io.EOF {
-					it.err = err
-				}
-
-				return ValNone
+		if err := readVarbitInts(&it.br, it.nBuckets); err != nil {
+			if err != io.EOF {
+				it.err = err
 			}
-			it.nBuckets[i] = v
+
+			return ValNone
 		}
 
 		it.numRead++
