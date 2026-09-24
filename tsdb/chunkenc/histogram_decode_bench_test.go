@@ -149,6 +149,53 @@ func TestVarbitIntRandomRoundTrip(t *testing.T) {
 	}
 }
 
+// TestVarbitIntsZeroRuns covers the step that takes a run of
+// zeros at once. Runs are longer than the read buffer, cross
+// every top up, and end at the end of the slice, so a read must
+// stop inside a run and leave the rest of it for the next read.
+// The stream ends in a run, which the last bytes read through
+// the slow path. The padding bits of the last byte are zeros as
+// well, so a read past the end does not fail; the read must only
+// take the values asked for.
+func TestVarbitIntsZeroRuns(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	limits := []int64{1, 4, 32, 256, 2048, 131072, 16777216, 36028797018963968, math.MaxInt64}
+	for round := 0; round < 50; round++ {
+		var numbers []int64
+		for len(numbers) < 3000 {
+			for n := rng.Intn(200); n > 0; n-- {
+				numbers = append(numbers, 0)
+			}
+			v := rng.Int63n(limits[rng.Intn(len(limits))]) + 1
+			if rng.Intn(2) == 0 {
+				v = -v
+			}
+			numbers = append(numbers, v)
+		}
+		for n := 1 + rng.Intn(100); n > 0; n-- {
+			numbers = append(numbers, 0)
+		}
+
+		bs := bstream{}
+		for _, n := range numbers {
+			putVarbitInt(&bs, n)
+		}
+		bsr := newBReader(bs.bytes())
+		for i := 0; i < len(numbers); {
+			n := min(1+rng.Intn(80), len(numbers)-i)
+			vals := make([]int64, n)
+			for j := range vals {
+				vals[j] = int64(j) + 3
+			}
+			require.NoError(t, readVarbitInts(&bsr, vals), "round %d values %d..%d", round, i, i+n)
+			for j := range vals {
+				require.Equal(t, numbers[i+j]+int64(j)+3, vals[j], "round %d value %d", round, i+j)
+			}
+			i += n
+		}
+	}
+}
+
 // TestVarbitIntsTruncatedStream checks that on a stream cut
 // short the fast path gives what the slow one gives, value for
 // value and error for error. A bit stream carries no count, so

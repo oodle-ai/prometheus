@@ -155,10 +155,14 @@ var varbitIntPayloadBits = [8]uint8{0, 3, 6, 9, 12, 18, 25, 56}
 // A table driven variant without the branch on the zero code
 // was measured slower: the dependent table loads cost more than
 // the branch misses.
+//
+// A zero is one 0 bit, and most buckets of a histogram whose
+// rates hold steady read a zero. So a run of 0 bits is taken in
+// one step, as a run of zeros: adding zero changes no element.
 func readVarbitInts(b *bstreamReader, vals []int64) error {
 	buffer, valid, off := b.buffer, b.valid, b.streamOffset
 	stream := b.stream
-	for i := range vals {
+	for i := 0; i < len(vals); i++ {
 		if valid < 32 && off+4 < len(stream) {
 			buffer = buffer<<32 | uint64(binary.BigEndian.Uint32(stream[off:]))
 			off += 4
@@ -168,8 +172,13 @@ func readVarbitInts(b *bstreamReader, vals []int64) error {
 		if valid >= 8 {
 			d := uint8(buffer >> (valid - 8))
 			if d&0x80 == 0 {
-				// A single zero bit: the value is zero.
-				valid--
+				// A run of 0 bits: that many values are zero.
+				// Shifting the valid bits to the top drops the
+				// stale ones above them. The run is at least one
+				// and at most the valid bits and the values left.
+				run := uint8(min(bits.LeadingZeros64(buffer<<(64-valid)), int(valid), len(vals)-i))
+				valid -= run
+				i += int(run) - 1
 				continue
 			}
 			n := uint8(bits.LeadingZeros8(^d))
