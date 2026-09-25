@@ -768,8 +768,7 @@ type histogramIterator struct {
 	t                            int64
 	cnt, zCnt                    uint64
 	tDelta, cntDelta, zCntDelta  int64
-	pBuckets, nBuckets           []int64   // Delta between buckets.
-	pFloatBuckets, nFloatBuckets []float64 // Absolute counts.
+	pBuckets, nBuckets           []int64 // Delta between buckets.
 	pBucketsDelta, nBucketsDelta []int64
 
 	// The sum is Gorilla xor encoded.
@@ -780,7 +779,7 @@ type histogramIterator struct {
 	// Track calls to retrieve methods. Once they have been called, we
 	// cannot recycle the bucket slices anymore because we have returned
 	// them in the histogram.
-	atHistogramCalled, atFloatHistogramCalled bool
+	atHistogramCalled bool
 
 	err error
 }
@@ -848,12 +847,20 @@ func (it *histogramIterator) AtHistogram(h *histogram.Histogram) (int64, *histog
 	return it.t, h
 }
 
+// AtFloatHistogram builds the absolute bucket counts from the
+// bucket deltas of the iterator each time it is called.
+// AtHistogram(nil) hands out those same deltas. A caller must not
+// change the buckets of that histogram: the change goes into the
+// result of this method for the same sample, and Next decodes the
+// next sample from the changed deltas.
 func (it *histogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int64, *histogram.FloatHistogram) {
 	if value.IsStaleNaN(it.sum) {
 		return it.t, &histogram.FloatHistogram{Sum: it.sum}
 	}
 	if fh == nil {
-		it.atFloatHistogramCalled = true
+		// Every read without a destination gets arrays of its own,
+		// sized once, so no later read writes into an array that
+		// was handed out.
 		return it.t, &histogram.FloatHistogram{
 			CounterResetHint: counterResetHint(it.counterResetHeader, it.numRead),
 			Count:            float64(it.cnt),
@@ -863,8 +870,8 @@ func (it *histogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int
 			Schema:           it.schema,
 			PositiveSpans:    it.pSpans,
 			NegativeSpans:    it.nSpans,
-			PositiveBuckets:  it.pFloatBuckets,
-			NegativeBuckets:  it.nFloatBuckets,
+			PositiveBuckets:  newAbsoluteCounts(it.pBuckets),
+			NegativeBuckets:  newAbsoluteCounts(it.nBuckets),
 			CustomValues:     it.customValues,
 		}
 	}
@@ -882,11 +889,8 @@ func (it *histogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int
 	fh.NegativeSpans = resize(fh.NegativeSpans, len(it.nSpans))
 	copy(fh.NegativeSpans, it.nSpans)
 
-	fh.PositiveBuckets = resize(fh.PositiveBuckets, len(it.pFloatBuckets))
-	copy(fh.PositiveBuckets, it.pFloatBuckets)
-
-	fh.NegativeBuckets = resize(fh.NegativeBuckets, len(it.nFloatBuckets))
-	copy(fh.NegativeBuckets, it.nFloatBuckets)
+	fh.PositiveBuckets = absoluteCounts(resize(fh.PositiveBuckets, len(it.pBuckets))[:0], it.pBuckets)
+	fh.NegativeBuckets = absoluteCounts(resize(fh.NegativeBuckets, len(it.nBuckets))[:0], it.nBuckets)
 
 	fh.CustomValues = resize(fh.CustomValues, len(it.customValues))
 	copy(fh.CustomValues, it.customValues)
@@ -923,13 +927,6 @@ func (it *histogramIterator) Reset(b []byte) {
 		it.pBuckets = it.pBuckets[:0]
 		it.nBuckets = it.nBuckets[:0]
 	}
-	if it.atFloatHistogramCalled {
-		it.atFloatHistogramCalled = false
-		it.pFloatBuckets, it.nFloatBuckets = nil, nil
-	} else {
-		it.pFloatBuckets = it.pFloatBuckets[:0]
-		it.nFloatBuckets = it.nFloatBuckets[:0]
-	}
 
 	it.pBucketsDelta = it.pBucketsDelta[:0]
 	it.nBucketsDelta = it.nBucketsDelta[:0]
@@ -964,12 +961,10 @@ func (it *histogramIterator) Next() ValueType {
 		if numPBuckets > 0 {
 			it.pBuckets = append(it.pBuckets, make([]int64, numPBuckets)...)
 			it.pBucketsDelta = append(it.pBucketsDelta, make([]int64, numPBuckets)...)
-			it.pFloatBuckets = append(it.pFloatBuckets, make([]float64, numPBuckets)...)
 		}
 		if numNBuckets > 0 {
 			it.nBuckets = append(it.nBuckets, make([]int64, numNBuckets)...)
 			it.nBucketsDelta = append(it.nBucketsDelta, make([]int64, numNBuckets)...)
-			it.nFloatBuckets = append(it.nFloatBuckets, make([]float64, numNBuckets)...)
 		}
 
 		// Now read the actual data.
@@ -1001,33 +996,21 @@ func (it *histogramIterator) Next() ValueType {
 		}
 		it.sum = math.Float64frombits(sum)
 
-		var current int64
-		for i := range it.pBuckets {
-			v, err := readVarbitInt(&it.br)
-			if err != nil {
-				if err != io.EOF {
-					it.err = err
-				}
-
-				return ValNone
+		// readVarbitInts adds to each bucket. The buckets were
+		// appended as zeros above, so the result is the value read.
+		if err := readVarbitInts(&it.br, it.pBuckets); err != nil {
+			if err != io.EOF {
+				it.err = err
 			}
-			it.pBuckets[i] = v
-			current += it.pBuckets[i]
-			it.pFloatBuckets[i] = float64(current)
+
+			return ValNone
 		}
-		current = 0
-		for i := range it.nBuckets {
-			v, err := readVarbitInt(&it.br)
-			if err != nil {
-				if err != io.EOF {
-					it.err = err
-				}
-
-				return ValNone
+		if err := readVarbitInts(&it.br, it.nBuckets); err != nil {
+			if err != io.EOF {
+				it.err = err
 			}
-			it.nBuckets[i] = v
-			current += it.nBuckets[i]
-			it.nFloatBuckets[i] = float64(current)
+
+			return ValNone
 		}
 
 		it.numRead++
@@ -1054,20 +1037,6 @@ func (it *histogramIterator) Next() ValueType {
 			it.nBuckets = newBuckets
 		} else {
 			it.nBuckets = nil
-		}
-	}
-	// FloatBuckets are set from scratch, so simply create empty ones.
-	if it.atFloatHistogramCalled {
-		it.atFloatHistogramCalled = false
-		if len(it.pFloatBuckets) > 0 {
-			it.pFloatBuckets = make([]float64, len(it.pFloatBuckets))
-		} else {
-			it.pFloatBuckets = nil
-		}
-		if len(it.nFloatBuckets) > 0 {
-			it.nFloatBuckets = make([]float64, len(it.nFloatBuckets))
-		} else {
-			it.nFloatBuckets = nil
 		}
 	}
 
@@ -1105,40 +1074,54 @@ func (it *histogramIterator) Next() ValueType {
 		return ValHistogram
 	}
 
-	var current int64
-	for i := range it.pBuckets {
-		dod, err := readVarbitInt(&it.br)
-		if err != nil {
-			if err != io.EOF {
-				it.err = err
-			}
-
-			return ValNone
+	if err := readVarbitInts(&it.br, it.pBucketsDelta); err != nil {
+		if err != io.EOF {
+			it.err = err
 		}
-		it.pBucketsDelta[i] += dod
-		it.pBuckets[i] += it.pBucketsDelta[i]
-		current += it.pBuckets[i]
-		it.pFloatBuckets[i] = float64(current)
+
+		return ValNone
 	}
+	applyBucketDeltas(it.pBucketsDelta, it.pBuckets)
 
-	current = 0
-	for i := range it.nBuckets {
-		dod, err := readVarbitInt(&it.br)
-		if err != nil {
-			if err != io.EOF {
-				it.err = err
-			}
-
-			return ValNone
+	if err := readVarbitInts(&it.br, it.nBucketsDelta); err != nil {
+		if err != io.EOF {
+			it.err = err
 		}
-		it.nBucketsDelta[i] += dod
-		it.nBuckets[i] += it.nBucketsDelta[i]
-		current += it.nBuckets[i]
-		it.nFloatBuckets[i] = float64(current)
+
+		return ValNone
 	}
+	applyBucketDeltas(it.nBucketsDelta, it.nBuckets)
 
 	it.numRead++
 	return ValHistogram
+}
+
+// applyBucketDeltas adds each delta to the bucket at the same
+// index. Both slices have the same length.
+func applyBucketDeltas(deltas, buckets []int64) {
+	buckets = buckets[:len(deltas)]
+	for i, d := range deltas {
+		buckets[i] += d
+	}
+}
+
+// newAbsoluteCounts makes one array for the absolute bucket counts.
+// It returns nil when there are no buckets.
+func newAbsoluteCounts(buckets []int64) []float64 {
+	if len(buckets) == 0 {
+		return nil
+	}
+	return absoluteCounts(make([]float64, 0, len(buckets)), buckets)
+}
+
+// absoluteCounts appends the absolute count of each bucket to dst.
+func absoluteCounts(dst []float64, buckets []int64) []float64 {
+	var current int64
+	for _, b := range buckets {
+		current += b
+		dst = append(dst, float64(current))
+	}
+	return dst
 }
 
 func (it *histogramIterator) readSum() bool {

@@ -14,6 +14,7 @@
 package chunkenc
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math/bits"
 )
@@ -127,6 +128,87 @@ func readVarbitInt(b *bstreamReader) (int64, error) {
 	}
 
 	return val, nil
+}
+
+// varbitIntPayloadBits is the payload size for each prefix
+// length of putVarbitInt, indexed by the number of leading one
+// bits. readVarbitInts reads only entries 1 to 6. A zero code
+// (no leading one) has no payload and has its own branch, and
+// prefixes of seven or eight ones (56 and 64 bit payloads) go
+// through readVarbitInt. Entries 0 and 7 are there only so that
+// the count of leading ones is the index.
+var varbitIntPayloadBits = [8]uint8{0, 3, 6, 9, 12, 18, 25, 56}
+
+// readVarbitInts reads len(vals) varbit ints, one per element,
+// and adds each to the element it lands on. It is readVarbitInt
+// in a loop, with the reader state held in locals, the prefix
+// read as one byte and the buffer topped up 32 bits at a time,
+// because a native histogram chunk reads one varbit int per
+// bucket per sample and that loop is most of the cost of
+// decoding one.
+//
+// Bits above `valid` in the buffer are never meaningful, here
+// or in bstreamReader, so a top up can shift them out. The top
+// up stops short of the last byte of the stream for the same
+// reason loadNextBuffer does. Whatever the fast path cannot
+// take, a 56 or 64 bit payload or a code cut by the end of the
+// stream, goes through readVarbitInt.
+//
+// The zero code has a branch of its own and does not go through
+// the payload table: it is the most frequent code, and the
+// branch keeps a table load out of its dependency chain.
+//
+// A zero is one 0 bit, and most buckets of a histogram whose
+// rates hold steady read a zero. So a run of 0 bits is taken in
+// one step, as a run of zeros: adding zero changes no element.
+func readVarbitInts(b *bstreamReader, vals []int64) error {
+	buffer, valid, off := b.buffer, b.valid, b.streamOffset
+	stream := b.stream
+	for i := 0; i < len(vals); i++ {
+		if valid < 32 && off+4 < len(stream) {
+			buffer = buffer<<32 | uint64(binary.BigEndian.Uint32(stream[off:]))
+			off += 4
+			valid += 32
+		}
+
+		if valid >= 8 {
+			d := uint8(buffer >> (valid - 8))
+			if d&0x80 == 0 {
+				// A run of 0 bits: that many values are zero.
+				// Shifting the valid bits to the top drops the
+				// stale ones above them. The run is at least one
+				// and at most the valid bits and the values left.
+				run := uint8(min(bits.LeadingZeros64(buffer<<(64-valid)), int(valid), len(vals)-i))
+				valid -= run
+				i += int(run) - 1
+				continue
+			}
+			n := uint8(bits.LeadingZeros8(^d))
+			if n < 7 {
+				sz := varbitIntPayloadBits[n]
+				total := n + 1 + sz
+				if total <= valid {
+					valid -= total
+					payload := (buffer >> valid) & ((uint64(1) << sz) - 1)
+					if payload > (1 << (sz - 1)) {
+						payload -= (1 << sz)
+					}
+					vals[i] += int64(payload)
+					continue
+				}
+			}
+		}
+
+		b.buffer, b.valid, b.streamOffset = buffer, valid, off
+		v, err := readVarbitInt(b)
+		if err != nil {
+			return err
+		}
+		buffer, valid, off = b.buffer, b.valid, b.streamOffset
+		vals[i] += v
+	}
+	b.buffer, b.valid, b.streamOffset = buffer, valid, off
+	return nil
 }
 
 func bitRangeUint(x uint64, nbits int) bool {
