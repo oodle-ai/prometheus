@@ -19,7 +19,6 @@ import (
 	"math"
 
 	"github.com/prometheus/prometheus/model/histogram"
-	"github.com/prometheus/prometheus/model/value"
 )
 
 // FloatHistogramChunk holds encoded sample data for a sparse, high-resolution
@@ -246,12 +245,12 @@ func (a *FloatHistogramAppender) appendable(h *histogram.FloatHistogram) (
 		counterReset = true
 		return
 	}
-	if value.IsStaleNaN(h.Sum) {
+	if isBucketlessMarker(h.Sum) {
 		// This is a stale sample whose buckets and spans don't matter.
 		okToAppend = true
 		return
 	}
-	if value.IsStaleNaN(a.sum.value) {
+	if isBucketlessMarker(a.sum.value) {
 		// If the last sample was stale, then we can only accept stale
 		// samples in this chunk.
 		return
@@ -324,12 +323,12 @@ func (a *FloatHistogramAppender) appendableGauge(h *histogram.FloatHistogram) (
 	if a.NumSamples() > 0 && a.GetCounterResetHeader() != GaugeType {
 		return
 	}
-	if value.IsStaleNaN(h.Sum) {
+	if isBucketlessMarker(h.Sum) {
 		// This is a stale sample whose buckets and spans don't matter.
 		okToAppend = true
 		return
 	}
-	if value.IsStaleNaN(a.sum.value) {
+	if isBucketlessMarker(a.sum.value) {
 		// If the last sample was stale, then we can only accept stale
 		// samples in this chunk.
 		return
@@ -427,7 +426,7 @@ func (a *FloatHistogramAppender) appendFloatHistogram(t int64, h *histogram.Floa
 	var tDelta int64
 	num := binary.BigEndian.Uint16(a.b.bytes())
 
-	if value.IsStaleNaN(h.Sum) {
+	if isBucketlessMarker(h.Sum) {
 		// Emptying out other fields to write no buckets, and an empty
 		// layout in case of first histogram in the chunk.
 		h = &histogram.FloatHistogram{Sum: h.Sum}
@@ -758,7 +757,7 @@ func (it *floatHistogramIterator) AtHistogram(*histogram.Histogram) (int64, *his
 }
 
 func (it *floatHistogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int64, *histogram.FloatHistogram) {
-	if value.IsStaleNaN(it.sum.value) {
+	if isBucketlessMarker(it.sum.value) {
 		return it.t, &histogram.FloatHistogram{Sum: it.sum.value}
 	}
 	if fh == nil {
@@ -962,7 +961,7 @@ func (it *floatHistogramIterator) Next() ValueType {
 		return ValNone
 	}
 
-	if value.IsStaleNaN(it.sum.value) {
+	if isBucketlessMarker(it.sum.value) {
 		it.numRead++
 		return ValFloatHistogram
 	}
