@@ -20,7 +20,6 @@ import (
 	"math"
 
 	"github.com/prometheus/prometheus/model/histogram"
-	"github.com/prometheus/prometheus/model/value"
 )
 
 // HistogramChunk holds encoded sample data for a sparse, high-resolution
@@ -267,12 +266,12 @@ func (a *HistogramAppender) appendable(h *histogram.Histogram) (
 		counterReset = true
 		return
 	}
-	if value.IsStaleNaN(h.Sum) {
+	if isBucketlessMarker(h.Sum) {
 		// This is a stale sample whose buckets and spans don't matter.
 		okToAppend = true
 		return
 	}
-	if value.IsStaleNaN(a.sum) {
+	if isBucketlessMarker(a.sum) {
 		// If the last sample was stale, then we can only accept stale
 		// samples in this chunk.
 		return
@@ -345,12 +344,12 @@ func (a *HistogramAppender) appendableGauge(h *histogram.Histogram) (
 	if a.NumSamples() > 0 && a.GetCounterResetHeader() != GaugeType {
 		return
 	}
-	if value.IsStaleNaN(h.Sum) {
+	if isBucketlessMarker(h.Sum) {
 		// This is a stale sample whose buckets and spans don't matter.
 		okToAppend = true
 		return
 	}
-	if value.IsStaleNaN(a.sum) {
+	if isBucketlessMarker(a.sum) {
 		// If the last sample was stale, then we can only accept stale
 		// samples in this chunk.
 		return
@@ -448,7 +447,7 @@ func (a *HistogramAppender) appendHistogram(t int64, h *histogram.Histogram) {
 	var tDelta, cntDelta, zCntDelta int64
 	num := binary.BigEndian.Uint16(a.b.bytes())
 
-	if value.IsStaleNaN(h.Sum) {
+	if isBucketlessMarker(h.Sum) {
 		// Emptying out other fields to write no buckets, and an empty
 		// layout in case of first histogram in the chunk.
 		h = &histogram.Histogram{Sum: h.Sum}
@@ -520,7 +519,7 @@ func (a *HistogramAppender) appendHistogram(t int64, h *histogram.Histogram) {
 		cntDod := cntDelta - a.cntDelta
 		zCntDod := zCntDelta - a.zCntDelta
 
-		if value.IsStaleNaN(h.Sum) {
+		if isBucketlessMarker(h.Sum) {
 			cntDod, zCntDod = 0, 0
 		}
 
@@ -802,7 +801,7 @@ func (it *histogramIterator) At() (int64, float64) {
 }
 
 func (it *histogramIterator) AtHistogram(h *histogram.Histogram) (int64, *histogram.Histogram) {
-	if value.IsStaleNaN(it.sum) {
+	if isBucketlessMarker(it.sum) {
 		return it.t, &histogram.Histogram{Sum: it.sum}
 	}
 	if h == nil {
@@ -854,7 +853,7 @@ func (it *histogramIterator) AtHistogram(h *histogram.Histogram) (int64, *histog
 // result of this method for the same sample, and Next decodes the
 // next sample from the changed deltas.
 func (it *histogramIterator) AtFloatHistogram(fh *histogram.FloatHistogram) (int64, *histogram.FloatHistogram) {
-	if value.IsStaleNaN(it.sum) {
+	if isBucketlessMarker(it.sum) {
 		return it.t, &histogram.FloatHistogram{Sum: it.sum}
 	}
 	if fh == nil {
@@ -1069,7 +1068,7 @@ func (it *histogramIterator) Next() ValueType {
 		return ValNone
 	}
 
-	if value.IsStaleNaN(it.sum) {
+	if isBucketlessMarker(it.sum) {
 		it.numRead++
 		return ValHistogram
 	}
