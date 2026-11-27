@@ -117,6 +117,9 @@ func (node *BinaryExpr) getMatchingStr() string {
 }
 
 func (node *Call) String() string {
+	if node.KeepMetricNames {
+		return fmt.Sprintf("%s(%s) %s", node.Func.Name, node.Args, keepMetricNamesKeyword)
+	}
 	return fmt.Sprintf("%s(%s)", node.Func.Name, node.Args)
 }
 
