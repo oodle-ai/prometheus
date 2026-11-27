@@ -115,6 +115,9 @@ type BinaryExpr struct {
 type Call struct {
 	Func *Function   // The function that was called.
 	Args Expressions // Arguments used in the call.
+	// KeepMetricNames is set by keep_metric_names of MetricsQL after
+	// the call: the function keeps the metric names of its series.
+	KeepMetricNames bool
 
 	PosRange posrange.PositionRange
 }
