@@ -56,6 +56,12 @@ type parser struct {
 	// Everytime an Item is lexed that could be the end
 	// of certain expressions its end position is stored here.
 	lastClosing posrange.Pos
+	// lastType is the type of the last item given to the generated
+	// parser.
+	lastType ItemType
+	// keepMetricNames are the keep_metric_names keywords of MetricsQL
+	// that the parser read. See setKeepMetricNames.
+	keepMetricNames []keepMetricNamesAt
 
 	yyParser yyParserImpl
 
@@ -79,6 +85,8 @@ func NewParser(input string, opts ...Opt) *parser { //nolint:revive // unexporte
 	p.injecting = false
 	p.parseErrors = nil
 	p.generatedParserResult = nil
+	p.lastType = 0
+	p.keepMetricNames = nil
 
 	// Clear lexer struct before reusing.
 	p.lex = Lexer{
@@ -101,6 +109,10 @@ func (p *parser) ParseExpr() (expr Expr, err error) {
 
 	if parseResult != nil {
 		expr = parseResult.(Expr)
+	}
+	if len(p.parseErrors) == 0 {
+		p.setKeepMetricNames(expr)
+		p.rewriteScalarClamps(expr)
 	}
 
 	// Only typecheck when there are no syntax errors.
@@ -349,14 +361,22 @@ func (p *parser) Lex(lval *yySymType) int {
 		p.injecting = false
 		return int(p.inject)
 	}
-	// Skip comments.
+	// Skip comments and the keep_metric_names keywords of MetricsQL.
 	for {
 		p.lex.NextItem(&lval.item)
 		typ = lval.item.Typ
+		if p.isKeepMetricNames(lval.item) {
+			p.keepMetricNames = append(p.keepMetricNames, keepMetricNamesAt{closing: p.lastClosing, pos: lval.item.PositionRange()})
+			// A second keyword is not after a parenthesis, so it
+			// goes to the generated parser, which refuses it.
+			p.lastType = IDENTIFIER
+			continue
+		}
 		if typ != COMMENT {
 			break
 		}
 	}
+	p.lastType = typ
 
 	switch typ {
 	case ERROR:

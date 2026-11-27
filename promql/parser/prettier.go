@@ -86,6 +86,9 @@ func (e *Call) Pretty(level int) string {
 		return s
 	}
 	s += fmt.Sprintf("%s(\n%s\n%s)", e.Func.Name, e.Args.Pretty(level+1), indent(level))
+	if e.KeepMetricNames {
+		s += " " + keepMetricNamesKeyword
+	}
 	return s
 }
 
